@@ -3,3 +3,5 @@ uvicorn
 rembg
 onnxruntime
 python-multipart
+openai-whisper
+ffmpeg-python
