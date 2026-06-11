@@ -8,13 +8,21 @@
 # subjects far more cleanly. The PRIMARY fix is still upstream (generate poses
 # on a #7A7A7A grey bg), but the better model is a safety net.
 #
-# The /remove-bg endpoint now also exposes OPTIONAL alpha-matting tuning. The
+# CHANGE (RedPill, autocrop): /remove-bg now trims fully-transparent margins so
+# the SUBJECT FILLS the PNG. Without this, a small subject centered in a large
+# canvas survives background removal as a tiny element floating in a mostly-
+# transparent image; the renderer then scales the empty canvas and the subject
+# looks tiny in the final video. autocrop defaults ON, so the workflow needs no
+# change. crop_pad adds optional uniform transparent padding (px) after the crop.
+#
+# The /remove-bg endpoint also exposes OPTIONAL alpha-matting tuning. The
 # workflow calls /remove-bg with NO query params, so defaults apply and behave
-# like a normal cutout with the better model. Pass alpha_matting=true only when
-# edges need extra polish.
+# like a normal cutout with the better model + autocrop.
 from fastapi import FastAPI, UploadFile, File, Query
 from fastapi.responses import Response
 from rembg import remove, new_session   # new_session lets us pick a better model
+from PIL import Image                    # autocrop: crop to the alpha bounding box
+import io                                # autocrop: in-memory PNG re-encode
 import whisper
 import tempfile, os
 
@@ -38,6 +46,10 @@ async def remove_background(
     bg_threshold: int = Query(10),    # alpha_matting_background_threshold
     erode_size: int = Query(10),      # alpha_matting_erode_size
     post_process: bool = Query(True), # clean up the mask for smoother edges
+    # Autocrop: trim fully-transparent margins so the subject fills the PNG.
+    # Default ON -> the workflow (which sends no query params) gets it for free.
+    autocrop: bool = Query(True),
+    crop_pad: int = Query(0),         # optional transparent padding (px) after crop
 ):
     input_bytes = await file.read()
     output_bytes = remove(
@@ -49,6 +61,26 @@ async def remove_background(
         alpha_matting_erode_size=erode_size,
         post_process_mask=post_process,
     )
+
+    # Trim transparent margins to the alpha channel's bounding box so the subject
+    # fills the returned PNG (the renderer then scales the SUBJECT, not empty space).
+    if autocrop:
+        img = Image.open(io.BytesIO(output_bytes)).convert("RGBA")
+        bbox = img.split()[-1].getbbox()   # bbox of non-transparent (alpha>0) pixels
+        if bbox:
+            img = img.crop(bbox)
+            if crop_pad > 0:
+                padded = Image.new(
+                    "RGBA",
+                    (img.width + 2 * crop_pad, img.height + 2 * crop_pad),
+                    (0, 0, 0, 0),
+                )
+                padded.paste(img, (crop_pad, crop_pad))
+                img = padded
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            output_bytes = buf.getvalue()
+
     return Response(content=output_bytes, media_type="image/png")
 
 @app.post("/transcribe")
